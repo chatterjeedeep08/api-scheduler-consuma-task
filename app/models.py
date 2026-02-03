@@ -53,4 +53,9 @@ class Run(Base):
     latency_ms = Column(Integer)
     response_size = Column(Integer)
 
+    execution_state = Column(
+        String,
+        default="pending"
+    )
+
     schedule = relationship("Schedule", back_populates="runs")

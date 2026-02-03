@@ -56,14 +56,18 @@ def execute_pending_runs():
         try:
             run = (
                 db.query(models.Run)
-                .filter(models.Run.status == "pending")
+                .filter(models.Run.execution_state == "pending")
                 .order_by(models.Run.id)
+                .with_for_update(skip_locked=True)
                 .first()
             )
 
             if not run:
                 time.sleep(1)
                 continue
+            
+            run.execution_state = "running"
+            db.commit()
 
             schedule = db.query(models.Schedule).get(run.schedule_id)
             target = db.query(models.Target).get(schedule.target_id)
@@ -98,6 +102,7 @@ def execute_pending_runs():
                 run.error_type = "connection_error"
 
             run.finished_at = datetime.utcnow()
+            run.execution_state = "done"
             db.commit()
 
         except Exception as e:
