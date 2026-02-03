@@ -67,7 +67,7 @@ class Run(Base):
     error_type = Column(String)
     latency_ms = Column(Integer)
     response_size = Column(Integer)
-    attempt_count = Column(Integer, default=0)
+    reattempt_count = Column(Integer, default=0)
     execution_state = Column(
         String,
         default="pending"

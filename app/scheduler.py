@@ -12,6 +12,8 @@ REQUEST_TIMEOUT = httpx.Timeout(
     write=5.0,
     pool=5.0
 )
+MAX_RETRIES = 2   # total attempts = 3 (0, 1, 2)
+RETRYABLE_ERRORS = {"connection_error", "timeout", "read_timeout", "connect_timeout"}
 
 shutdown_event = threading.Event()
 
@@ -70,7 +72,7 @@ def execute_runs():
         try:
             run = (
                 db.query(models.Run)
-                .filter(models.Run.status == "pending")
+                .filter(models.Run.execution_state == "pending")
                 .order_by(models.Run.id)
                 .first()
             )
@@ -115,10 +117,21 @@ def execute_runs():
             except httpx.ConnectTimeout:
                 run.status = "failed"
                 run.error_type = "connect_timeout"
+                
             except httpx.ReadTimeout:
                 run.status = "failed"
                 run.error_type = "read_timeout"
 
+            if run.status == "failed" and run.error_type in RETRYABLE_ERRORS:
+                if run.attempt_count < MAX_RETRIES:
+                    run.attempt_count += 1
+                    run.execution_state = "pending"
+                    run.finished_at = None
+                    db.commit()
+                    continue
+                else:
+                    pass  # Exceeded retries, finalize as failed
+                
             run.execution_state = "done"
             run.finished_at = datetime.utcnow()
             db.commit()
