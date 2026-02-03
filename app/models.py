@@ -20,7 +20,11 @@ class Target(Base):
     headers = Column(String)      # store as JSON string
     body = Column(String)         # store as JSON string
 
-    schedules = relationship("Schedule", back_populates="target")
+    schedules = relationship(
+        "Schedule",
+        back_populates="target",
+        cascade="all, delete-orphan"
+    )
 
 
 class Schedule(Base):
