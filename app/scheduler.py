@@ -123,8 +123,8 @@ def execute_runs():
                 run.error_type = "read_timeout"
 
             if run.status == "failed" and run.error_type in RETRYABLE_ERRORS:
-                if run.attempt_count < MAX_RETRIES:
-                    run.attempt_count += 1
+                if run.reattempt_count < MAX_RETRIES:
+                    run.reattempt_count += 1
                     run.execution_state = "pending"
                     run.finished_at = None
                     db.commit()
