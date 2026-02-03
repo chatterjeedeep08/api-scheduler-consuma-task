@@ -35,7 +35,11 @@ class Schedule(Base):
     end_time = Column(DateTime, nullable=True)
 
     target = relationship("Target", back_populates="schedules")
-    runs = relationship("Run", back_populates="schedule")
+    runs = relationship(
+    "Run",
+    back_populates="schedule",
+    cascade="all, delete-orphan"
+)
 
 
 class Run(Base):
