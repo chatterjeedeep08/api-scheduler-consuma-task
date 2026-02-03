@@ -178,6 +178,7 @@ AI tools were used for:
 - Refactoring guidance
 
 All implementation, design decisions, and testing were done by me.
+
 Tools used: ChatGPT 5.2, Claude Sonnet 4.5
 
 ---
