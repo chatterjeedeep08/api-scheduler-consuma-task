@@ -8,7 +8,8 @@ from sqlalchemy import (
 from sqlalchemy.orm import relationship
 from datetime import datetime
 from .database import Base
-
+from sqlalchemy import UniqueConstraint
+from sqlalchemy import Column, Integer
 
 class Target(Base):
     __tablename__ = "targets"
@@ -39,23 +40,28 @@ class Schedule(Base):
 
 class Run(Base):
     __tablename__ = "runs"
+    
+    __table_args__ = (
+        UniqueConstraint(
+            "schedule_id",
+            "scheduled_for",
+            name="uq_schedule_run"
+        ),
+    )
 
     id = Column(Integer, primary_key=True, index=True)
     schedule_id = Column(Integer, ForeignKey("schedules.id"), nullable=False)
-
     scheduled_for = Column(DateTime, nullable=False)
     started_at = Column(DateTime)
     finished_at = Column(DateTime)
-
     status = Column(String)  # success | failed
     status_code = Column(Integer)
     error_type = Column(String)
     latency_ms = Column(Integer)
     response_size = Column(Integer)
-
+    attempt_count = Column(Integer, default=0)
     execution_state = Column(
         String,
         default="pending"
     )
-
     schedule = relationship("Schedule", back_populates="runs")
