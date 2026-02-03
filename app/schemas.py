@@ -1,4 +1,4 @@
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 from typing import Optional
 from datetime import datetime
 
@@ -19,7 +19,7 @@ class TargetOut(TargetCreate):
 
 class ScheduleCreate(BaseModel):
     target_id: int
-    interval_seconds: int
+    interval_seconds: int = Field(gt=0)
     end_time: Optional[datetime] = None
 
 
@@ -46,3 +46,5 @@ class RunOut(BaseModel):
     class Config:
         from_attributes = True
 
+class ScheduleDetailOut(ScheduleOut):
+    runs: list[RunOut]

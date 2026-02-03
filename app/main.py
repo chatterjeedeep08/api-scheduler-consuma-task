@@ -7,17 +7,24 @@ from fastapi import Depends
 from . import models, schemas
 from datetime import datetime
 from threading import Thread
-from .scheduler import scheduler_loop
-from .scheduler import execute_pending_runs
 from typing import Optional
 from sqlalchemy import func
+from fastapi import HTTPException
+from threading import Thread
+from .scheduler import schedule_runs, execute_runs, shutdown_event
 
 app = FastAPI(title="API Scheduler Consuma")
 
+ALLOWED_METHODS = {"GET", "POST", "PUT", "DELETE"}
+
 @app.on_event("startup")
 def start_workers():
-    Thread(target=scheduler_loop, daemon=True).start()
-    Thread(target=execute_pending_runs, daemon=True).start()
+    Thread(target=schedule_runs, daemon=True).start()
+    Thread(target=execute_runs, daemon=True).start()
+    
+@app.on_event("shutdown")
+def shutdown_workers():
+    shutdown_event.set()
 
 # THIS creates the DB file
 Base.metadata.create_all(bind=engine)
@@ -32,13 +39,30 @@ def get_db():
         yield db
     finally:
         db.close()
+        
+#==============================
+# TARGET ENDPOINTS
+#==============================
 
 @app.post("/targets", response_model=schemas.TargetOut)
 def create_target(
     target: schemas.TargetCreate,
     db: Session = Depends(get_db)
 ):
-    db_target = models.Target(**target.dict())
+    method = target.method.upper()
+
+    if method not in ALLOWED_METHODS:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Invalid HTTP method. Allowed: {ALLOWED_METHODS}"
+        )
+
+    db_target = models.Target(
+        url=target.url,
+        method=method,
+        headers=target.headers,
+        body=target.body
+    )
     db.add(db_target)
     db.commit()
     db.refresh(db_target)
@@ -48,11 +72,57 @@ def create_target(
 def list_targets(db: Session = Depends(get_db)):
     return db.query(models.Target).all()
 
+@app.put("/targets/{target_id}", response_model=schemas.TargetOut)
+def update_target(
+    target_id: int,
+    updated: schemas.TargetCreate,
+    db: Session = Depends(get_db)
+):
+    target = db.query(models.Target).get(target_id)
+    if not target:
+        raise HTTPException(404, "Target not found")
+
+    for key, value in updated.dict().items():
+        setattr(target, key, value)
+
+    db.commit()
+    db.refresh(target)
+    return target
+
+@app.delete("/targets/{target_id}")
+def delete_target(target_id: int, db: Session = Depends(get_db)):
+    target = db.query(models.Target).get(target_id)
+    if not target:
+        raise HTTPException(404, "Target not found")
+
+    db.delete(target)
+    db.commit()
+    return {"deleted": True}
+
+
+#==============================
+# SCHEDULE ENDPOINTS
+#==============================
+
 @app.post("/schedules", response_model=schemas.ScheduleOut)
 def create_schedule(
     schedule: schemas.ScheduleCreate,
     db: Session = Depends(get_db)
 ):
+    # Guardrail 1: interval must be positive
+    if schedule.interval_seconds <= 0:
+        raise HTTPException(
+            status_code=400,
+            detail="interval_seconds must be greater than 0"
+        )
+
+    # Guardrail 2: end_time must be in the future
+    if schedule.end_time and schedule.end_time <= datetime.utcnow():
+        raise HTTPException(
+            status_code=400,
+            detail="end_time must be in the future"
+        )
+        
     next_run = datetime.utcnow()
 
     db_schedule = models.Schedule(
@@ -92,21 +162,57 @@ def resume_schedule(schedule_id: int, db: Session = Depends(get_db)):
 def list_schedules(db: Session = Depends(get_db)):
     return db.query(models.Schedule).all()
 
+@app.get("/schedules/{schedule_id}", response_model=schemas.ScheduleDetailOut)
+def get_schedule(schedule_id: int, db: Session = Depends(get_db)):
+    schedule = db.query(models.Schedule).get(schedule_id)
+    if not schedule:
+        raise HTTPException(404, "Schedule not found")
+
+    runs = (
+        db.query(models.Run)
+        .filter(models.Run.schedule_id == schedule_id)
+        .order_by(models.Run.id.desc())
+        .limit(10)
+        .all()
+    )
+
+    schedule.runs = runs
+    return schedule
+
+@app.delete("/schedules/{schedule_id}")
+def delete_schedule(schedule_id: int, db: Session = Depends(get_db)):
+    schedule = db.query(models.Schedule).get(schedule_id)
+    if not schedule:
+        raise HTTPException(404, "Schedule not found")
+
+    db.delete(schedule)
+    db.commit()
+    return {"deleted": True}
+
+#==============================
+# RUN ENDPOINTS
+#==============================
+
 @app.get("/runs", response_model=list[schemas.RunOut])
 def list_runs(
-    schedule_id: Optional[int] = None,
-    status: Optional[str] = None,
+    schedule_id: int | None = None,
+    status: str | None = None,
+    from_time: datetime | None = None,
+    to_time: datetime | None = None,
     db: Session = Depends(get_db)
 ):
     query = db.query(models.Run)
 
     if schedule_id:
         query = query.filter(models.Run.schedule_id == schedule_id)
-
     if status:
         query = query.filter(models.Run.status == status)
+    if from_time:
+        query = query.filter(models.Run.scheduled_for >= from_time)
+    if to_time:
+        query = query.filter(models.Run.scheduled_for <= to_time)
 
-    return query.order_by(models.Run.id.desc()).all()
+    return query.order_by(models.Run.id.desc()).limit(100).all()
 
 @app.get("/runs/{run_id}", response_model=schemas.RunOut)
 def get_run(run_id: int, db: Session = Depends(get_db)):
@@ -114,6 +220,10 @@ def get_run(run_id: int, db: Session = Depends(get_db)):
     if not run:
         return {"error": "Run not found"}
     return run
+
+#==============================
+# METRICS ENDPOINTS
+#==============================
 
 @app.get("/metrics")
 def metrics(db: Session = Depends(get_db)):
@@ -140,3 +250,4 @@ def metrics(db: Session = Depends(get_db)):
         "avg_latency_ms": avg_latency,
         "errors": {e or "none": c for e, c in error_breakdown}
     }
+

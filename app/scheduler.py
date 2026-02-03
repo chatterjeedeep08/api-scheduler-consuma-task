@@ -1,14 +1,26 @@
 import time
 from datetime import datetime, timedelta
+import httpx
 from sqlalchemy.orm import Session
 from .database import SessionLocal
 from . import models
-import httpx
-from sqlalchemy import and_
-from sqlalchemy.exc import IntegrityError
+import threading
 
-def scheduler_loop():
-    while True:
+REQUEST_TIMEOUT = httpx.Timeout(
+    connect=3.0,
+    read=5.0,
+    write=5.0,
+    pool=5.0
+)
+
+shutdown_event = threading.Event()
+
+def schedule_runs():
+    """
+    Periodically scans schedules and creates Run records.
+    This function NEVER executes HTTP requests.
+    """
+    while not shutdown_event.is_set():
         db: Session = SessionLocal()
         try:
             now = datetime.utcnow()
@@ -23,26 +35,17 @@ def scheduler_loop():
             )
 
             for schedule in schedules:
-                # stop if end_time exceeded
                 if schedule.end_time and now >= schedule.end_time:
                     schedule.status = "completed"
                     continue
 
-                # create run
                 run = models.Run(
                     schedule_id=schedule.id,
                     scheduled_for=schedule.next_run_at,
                     status="pending"
                 )
-                
-                try:
-                    db.add(run)
-                    db.flush()  # IMPORTANT: forces INSERT now
-                except IntegrityError:
-                    db.rollback()
-                    continue
+                db.add(run)
 
-                # advance next run
                 schedule.next_run_at = schedule.next_run_at + timedelta(
                     seconds=schedule.interval_seconds
                 )
@@ -57,13 +60,17 @@ def scheduler_loop():
 
         time.sleep(1)
 
-def execute_pending_runs():
-    while True:
-        db = SessionLocal()
+def execute_runs():
+    """
+    Picks pending Run records and executes HTTP requests.
+    This function NEVER schedules future runs.
+    """
+    while not shutdown_event.is_set():
+        db: Session = SessionLocal()
         try:
             run = (
                 db.query(models.Run)
-                .filter(models.Run.execution_state == "pending")
+                .filter(models.Run.status == "pending")
                 .order_by(models.Run.id)
                 .first()
             )
@@ -71,24 +78,11 @@ def execute_pending_runs():
             if not run:
                 time.sleep(1)
                 continue
-            
-            run.execution_state = "running"
-            updated = db.query(models.Run).filter(
-                models.Run.id == run.id,
-                models.Run.execution_state == "pending"
-            ).update({"execution_state": "running"})
-
-            if updated == 0:
-                db.rollback()
-                continue
-            
-            db.commit()
 
             schedule = db.query(models.Schedule).get(run.schedule_id)
             target = db.query(models.Target).get(schedule.target_id)
 
             run.started_at = datetime.utcnow()
-            run.attempt_count += 1
             db.commit()
 
             start_time = time.time()
@@ -99,7 +93,7 @@ def execute_pending_runs():
                     url=target.url,
                     headers=eval(target.headers) if target.headers else None,
                     data=target.body,
-                    timeout=5.0
+                    timeout=REQUEST_TIMEOUT
                 )
 
                 latency = int((time.time() - start_time) * 1000)
@@ -117,22 +111,19 @@ def execute_pending_runs():
                 run.status = "failed"
                 run.error_type = "connection_error"
                 
-            if run.error_type in ["timeout", "connection_error"]:
-                if run.attempt_count < 3:
-                    run.status = "pending"
-                    run.execution_state = "pending"
-                    run.started_at = None
-                    run.error_type = None
-                    db.commit()
-                    continue
-            
+            except httpx.ConnectTimeout:
+                run.status = "failed"
+                run.error_type = "connect_timeout"
+            except httpx.ReadTimeout:
+                run.status = "failed"
+                run.error_type = "read_timeout"
+
             run.finished_at = datetime.utcnow()
-            run.execution_state = "done"
             db.commit()
 
         except Exception as e:
             db.rollback()
-            print("Execution error:", e)
+            print("Executor error:", e)
         finally:
             db.close()
 
