@@ -82,6 +82,7 @@ def execute_runs():
             schedule = db.query(models.Schedule).get(run.schedule_id)
             target = db.query(models.Target).get(schedule.target_id)
 
+            run.execution_state = "running"
             run.started_at = datetime.utcnow()
             db.commit()
 
@@ -118,9 +119,10 @@ def execute_runs():
                 run.status = "failed"
                 run.error_type = "read_timeout"
 
+            run.execution_state = "done"
             run.finished_at = datetime.utcnow()
             db.commit()
-
+            
         except Exception as e:
             db.rollback()
             print("Executor error:", e)
